@@ -1,0 +1,21 @@
+# PlatformIO Environment
+.pio/
+.pioenvs
+.piolibdeps
+.clang-format
+
+# IDE integration
+.vscode/
+.idea/
+
+# Build output & temp files
+*.swp
+*~
+*.tmp
+*.o
+*.obj
+*.a
+*.lib
+*.elf
+*.hex
+*.bin
