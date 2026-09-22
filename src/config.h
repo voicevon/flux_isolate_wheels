@@ -39,8 +39,8 @@
 // ============================================================================
 // 通信配置：WiFi + MQTT（蓝牙已移除，经典蓝牙与 WiFi 不能共存）
 // ============================================================================
-#define WIFI_SSID         ""      // TODO: 填入 WiFi 名称
-#define WIFI_PASSWORD     ""      // TODO: 填入 WiFi 密码
+#define WIFI_SSID         "Perfect"      // TODO: 填入 WiFi 名称
+#define WIFI_PASSWORD     "12344321"      // TODO: 填入 WiFi 密码
 
 #define MQTT_HOST         "voicevon.vicp.io"
 #define MQTT_PORT         1883
