@@ -331,15 +331,23 @@ void AppProduction::executeMultiMove(const float angles[8]) {
         _targetSteps[0], _targetSteps[1], _targetSteps[2], _targetSteps[3],
         _targetSteps[4], _targetSteps[5], _targetSteps[6], _targetSteps[7]);
 
-  // 方向数据一次写入 74HC595（经 DIR_INVERT_MASK 换算物理方向），随后 8 路电机同时启动
+  // 方向数据一次写入 74HC595（经 DIR_INVERT_MASK 换算物理方向），随后 8 路电机同时启动。
+  // 启动循环内不得插入 LOG_I（阻塞式 MQTT 发送会把各路启动时刻拉开 ~10ms），
+  // 先记录启动时差、全部启动后再统一输出
   _spiBus.transfer(dirBits ^ DIR_INVERT_MASK);
   uint32_t t0 = micros();
-  LOG_I("multi 启动时刻 t=%lu us", t0);
-  for (int i = 0; i < 8; i++) {
+  uint32_t dtStart[NUM_MOTORS];
+  for (int i = 0; i < NUM_MOTORS; i++) {
+    dtStart[i] = 0;
     if (_targetSteps[i] > 0) {
-      uint32_t ts = micros();
+      dtStart[i] = micros() - t0;
       _motorHardware.startMove(i, _targetSteps[i]);
-      LOG_I("  M%d startMove @ t=%lu us (dt=%lu us)", i, ts, ts - t0);
+    }
+  }
+  LOG_I("multi 启动时刻 t=%lu us", t0);
+  for (int i = 0; i < NUM_MOTORS; i++) {
+    if (_targetSteps[i] > 0) {
+      LOG_I("  M%d startMove dt=%lu us", i, dtStart[i]);
     }
   }
 
