@@ -25,6 +25,9 @@ public:
   // 是否有任一电机在运动
   bool isMoving() const;
 
+  // 单电机是否在运动 (调试诊断用)
+  bool isMotorRunning(uint8_t motorIndex) const;
+
   // 所有电机位置清零
   void setCurrentPosition(long pos);
 

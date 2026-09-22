@@ -333,9 +333,13 @@ void AppProduction::executeMultiMove(const float angles[8]) {
 
   // 方向数据一次写入 74HC595（经 DIR_INVERT_MASK 换算物理方向），随后 8 路电机同时启动
   _spiBus.transfer(dirBits ^ DIR_INVERT_MASK);
+  uint32_t t0 = micros();
+  LOG_I("multi 启动时刻 t=%lu us", t0);
   for (int i = 0; i < 8; i++) {
     if (_targetSteps[i] > 0) {
+      uint32_t ts = micros();
       _motorHardware.startMove(i, _targetSteps[i]);
+      LOG_I("  M%d startMove @ t=%lu us (dt=%lu us)", i, ts, ts - t0);
     }
   }
 
@@ -357,7 +361,15 @@ void AppProduction::loop() {
       break;
 
     case BEAT_RUNNING: {
-      // 8 路电机各自独立运动，等待全部到位
+      // 8 路电机各自独立运动，等待全部到位；同时记录每台停止时刻 (诊断并行性)
+      static bool _prevRunning[NUM_MOTORS] = {false};
+      for (int i = 0; i < NUM_MOTORS; i++) {
+        bool r = _motorHardware.isMotorRunning(i);
+        if (_prevRunning[i] && !r) {
+          LOG_I("  M%d 停止 @ t=%lu us", i, micros());
+        }
+        _prevRunning[i] = r;
+      }
       if (!_motorHardware.isMoving()) {
         _state = BEAT_COMPLETED;
       }

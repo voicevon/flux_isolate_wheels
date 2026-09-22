@@ -1,4 +1,4 @@
-# 临时测试脚本：验证 flux_loader MQTT 协议（单电机调试命令）
+# 临时测试脚本：验证 flux_loader MQTT 协议（单电机 + 多电机调试命令）
 import json
 import sys
 import time
@@ -66,9 +66,33 @@ def main():
     print(f"  收到 done(motor): {'是' if got_done else '否'}")
     states = [p for k, p in events if k == "state"]
     print(f"  state 序列: {states}")
+    motor_ok = got_done
+
+    # ===== multi 多电机调试：1号正转90°、2号反转45°、3号正转90°，其余不动 =====
+    # 预期现象：3 台电机同时启动、同时结束（45° 者先停），而不是依次转动
+    events.clear()
+    print("\n[发送] multi 多电机调试: [90, -45, 90, 0, 0, 0, 0, 0]")
+    cmd = {"cmd": "multi", "angles": [90, -45, 90, 0, 0, 0, 0, 0]}
+    client.publish(f"{BASE}/cmd", json.dumps(cmd))
+
+    deadline = time.time() + 15
+    got_done = False
+    while time.time() < deadline and not got_done:
+        for kind, payload in events:
+            if kind == "done" and '"cmd":"multi"' in payload.replace(" ", ""):
+                got_done = True
+        time.sleep(0.1)
+
+    time.sleep(1)
+    print("\n[结果]")
+    print(f"  收到 done(multi): {'是' if got_done else '否'}")
+    states = [p for k, p in events if k == "state"]
+    print(f"  state 序列: {states}")
+    multi_ok = got_done
+
     client.loop_stop()
     client.disconnect()
-    sys.exit(0 if got_done else 1)
+    sys.exit(0 if (motor_ok and multi_ok) else 1)
 
 
 if __name__ == "__main__":
