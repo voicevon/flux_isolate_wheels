@@ -29,9 +29,10 @@ void MqttLink::buildTopics() {
 }
 
 void MqttLink::begin() {
-  // 设备 ID：efuse MAC 低 16 位十六进制
-  uint64_t mac = ESP.getEfuseMac();
-  snprintf(_deviceId, sizeof(_deviceId), "%04X", (uint16_t)(mac & 0xFFFF));
+  // 设备 ID：MAC 地址后 4 位十六进制
+  WiFi.mode(WIFI_STA);
+  String mac = WiFi.macAddress(); // 形如 "C8:F0:9E:04:F8:EC"
+  snprintf(_deviceId, sizeof(_deviceId), "%s", mac.substring(12).c_str());
   buildTopics();
 
   if (strlen(_ssid) == 0) {
@@ -39,7 +40,6 @@ void MqttLink::begin() {
     return;
   }
 
-  WiFi.mode(WIFI_STA);
   WiFi.begin(_ssid, _password);
 
   _mqtt.setServer(_host, _port);
@@ -104,9 +104,11 @@ void MqttLink::loop() {
   _mqtt.loop();
 }
 
-void MqttLink::publishDone() {
+void MqttLink::publishDone(const char* cmdType) {
   if (_mqtt.connected()) {
-    _mqtt.publish(_topicDone, "{\"event\":\"done\"}");
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"event\":\"done\",\"cmd\":\"%s\"}", cmdType);
+    _mqtt.publish(_topicDone, buf);
   }
 }
 

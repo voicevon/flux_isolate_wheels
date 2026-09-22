@@ -33,8 +33,8 @@ public:
 
   void onCommand(CommandFn fn) { _onCommand = fn; }
 
-  // 发布节拍完成应答
-  void publishDone();
+  // 发布节拍完成应答，cmdType 为触发本次节拍的命令类型 ("load" / "motor")
+  void publishDone(const char* cmdType);
 
   // 发布运行状态 (保留消息)，state 取值如 "idle" / "running"
   void publishState(const char* state);

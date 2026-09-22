@@ -10,9 +10,47 @@
 // 全局唯一实例指针，供 MQTT 命令回调中转
 static AppProduction* s_production = NULL;
 
+// --- 简易扁平 JSON 字段提取（无需完整解析器） ---
+
+// 提取字符串字段值（"key":"value"），成功返回 true
+static bool jsonGetString(const String& s, const char* key, String& out) {
+  int k = s.indexOf(String("\"") + key + "\"");
+  if (k < 0) return false;
+  int colon = s.indexOf(':', k);
+  if (colon < 0) return false;
+  int q1 = s.indexOf('"', colon);
+  if (q1 < 0) return false;
+  int q2 = s.indexOf('"', q1 + 1);
+  if (q2 < 0) return false;
+  out = s.substring(q1 + 1, q2);
+  return true;
+}
+
+// 提取数值字段值（"key":123 / "key":22.5），成功返回 true
+static bool jsonGetFloat(const String& s, const char* key, float& out) {
+  int k = s.indexOf(String("\"") + key + "\"");
+  if (k < 0) return false;
+  int colon = s.indexOf(':', k);
+  if (colon < 0) return false;
+  int p = colon + 1;
+  while (p < (int)s.length() && (s[p] == ' ' || s[p] == '\t')) p++;
+  int start = p;
+  if (p < (int)s.length() && s[p] == '-') p++;
+  bool hasDigit = false, hasDot = false;
+  while (p < (int)s.length()) {
+    char c = s[p];
+    if (c >= '0' && c <= '9') { p++; hasDigit = true; }
+    else if (c == '.' && !hasDot) { p++; hasDot = true; }
+    else break;
+  }
+  if (!hasDigit) return false;
+  out = s.substring(start, p).toFloat();
+  return true;
+}
+
 AppProduction::AppProduction(MotorHardware& motorHardware, ShiftRegisterBus& spiBus, MqttLink& mqttLink)
   : _motorHardware(motorHardware), _spiBus(spiBus), _mqtt(mqttLink),
-    _state(BEAT_IDLE) {
+    _state(BEAT_IDLE), _beatCmd("load"), _diagBeat(false) {
   memset(_asparagusCounts, 0, sizeof(_asparagusCounts));
   memset(_targetSteps, 0, sizeof(_targetSteps));
   s_production = this;
@@ -21,6 +59,8 @@ AppProduction::AppProduction(MotorHardware& motorHardware, ShiftRegisterBus& spi
 void AppProduction::setup() {
   LOG_I("--- [生产模式] 启动 ---");
   _state = BEAT_IDLE;
+  _beatCmd = "load";
+  _diagBeat = false;
   memset(_asparagusCounts, 0, sizeof(_asparagusCounts));
   memset(_targetSteps, 0, sizeof(_targetSteps));
 
@@ -51,10 +91,45 @@ void AppProduction::handleCommand(const char* payload) {
     LOG_W("节拍进行中，忽略新命令");
     return;
   }
-  if (parseCommand(payload)) {
-    executeMove();
+
+  String data(payload);
+  String cmd;
+  if (!jsonGetString(data, "cmd", cmd)) {
+    LOG_W("忽略缺少 cmd 字段的命令: %s", payload);
+    return;
+  }
+
+  if (cmd == "load") {
+    if (parseCommand(payload)) {
+      executeMove();
+    } else {
+      LOG_W("忽略无效的 load 命令: %s", payload);
+    }
+  } else if (cmd == "motor") {
+    // 单电机调试命令: {"cmd":"motor","motor":5,"dir":1,"angle":90}
+    float motorF = 0, dirF = 0, angle = 0;
+    if (!jsonGetFloat(data, "motor", motorF) ||
+        !jsonGetFloat(data, "dir", dirF) ||
+        !jsonGetFloat(data, "angle", angle)) {
+      LOG_W("忽略缺少字段的 motor 命令: %s", payload);
+      return;
+    }
+    long motor = (long)motorF, dir = (long)dirF;
+    if (motor < 1 || motor > 8) {
+      LOG_W("motor 命令电机号越界 (%ld)，须为 1-8", motor);
+      return;
+    }
+    if (dir != 0 && dir != 1) {
+      LOG_W("motor 命令方向非法 (%ld)，0=反转 1=正转", dir);
+      return;
+    }
+    if (angle <= 0.0f || angle > 360.0f) {
+      LOG_W("motor 命令角度越界 (%.1f°)，须为 0-360", angle);
+      return;
+    }
+    executeDiagMove((uint8_t)motor, (int)dir, angle);
   } else {
-    LOG_W("忽略无效的 MQTT 命令: %s", payload);
+    LOG_W("忽略未知命令类型: %s", cmd.c_str());
   }
 }
 
@@ -147,10 +222,36 @@ void AppProduction::executeMove() {
 
   if (!anyMove) {
     LOG_I("当前节拍没有电机需要旋转。");
+    _beatCmd = "load";
     _state = BEAT_COMPLETED;
     return;
   }
 
+  _beatCmd = "load";
+  _mqtt.publishState("running");
+  _state = BEAT_RUNNING;
+}
+
+void AppProduction::executeDiagMove(uint8_t motor1to8, int dir, float angleDeg) {
+  uint8_t idx = motor1to8 - 1; // 数组索引 0-7
+
+  // 角度 → 步数 (1/16 细分下 90° = 800 步)，支持 22.5 等小数角度
+  long steps = (long)(angleDeg * (float)STEPS_PER_90DEG / 90.0f + 0.5f);
+
+  LOG_I("调试运动: 电机 %d 号 %s %.1f° (%ld 步)",
+        motor1to8, dir ? "正转" : "反转", angleDeg, steps);
+
+  // 调试运动采用低速参数，节拍完成后恢复
+  _motorHardware.setMaxSpeed(STEPPER_DIAG_SPEED);
+  _motorHardware.setAcceleration(STEPPER_DIAG_ACCEL);
+
+  // 方向经 74HC595 输出: 正转该电机位为 1，反转为 0
+  _spiBus.transfer(dir ? (1 << idx) : 0);
+
+  _motorHardware.startMove(idx, steps);
+
+  _diagBeat = true;
+  _beatCmd = "motor";
   _mqtt.publishState("running");
   _state = BEAT_RUNNING;
 }
@@ -173,10 +274,17 @@ void AppProduction::loop() {
       // 动作结束，停止所有电机
       _motorHardware.stop();
 
-      // 发布节拍完成应答
-      _mqtt.publishDone();
+      // 调试节拍结束后恢复生产速度参数
+      if (_diagBeat) {
+        _diagBeat = false;
+        _motorHardware.setMaxSpeed(STEPPER_MAX_SPEED);
+        _motorHardware.setAcceleration(STEPPER_ACCELERATION);
+      }
+
+      // 发布节拍完成应答（回带命令类型）
+      _mqtt.publishDone(_beatCmd);
       _mqtt.publishState("idle");
-      LOG_I("节拍完成，已发布 done 应答");
+      LOG_I("节拍完成(%s)，已发布 done 应答", _beatCmd);
 
       // 重置，进入下一个节拍等待
       _state = BEAT_IDLE;

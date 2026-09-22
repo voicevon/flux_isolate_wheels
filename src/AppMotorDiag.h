@@ -7,8 +7,6 @@
 // --- 电机诊断配置 ---
 #define DIAG_TARGET_ROTATIONS 0.25f   // 诊断模式下执行机构目标旋转圈数
 #define DIAG_STEPS  ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO * DIAG_TARGET_ROTATIONS))
-#define DIAG_MOTOR_SPEED      800.0f   // 诊断模式电机最大速度（步/秒）
-#define DIAG_MOTOR_ACCEL      1600.0f   // 诊断模式电机加速度（步/秒²）
 
 class MotorHardware;
 class ShiftRegisterBus;

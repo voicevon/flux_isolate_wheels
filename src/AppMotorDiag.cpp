@@ -16,8 +16,8 @@ void AppMotorDiag::setup() {
   _pauseTimer = 0;
   
   // 设置诊断专用的低速度和加速度
-  _motorHardware.setMaxSpeed(DIAG_MOTOR_SPEED);
-  _motorHardware.setAcceleration(DIAG_MOTOR_ACCEL);
+  _motorHardware.setMaxSpeed(STEPPER_DIAG_SPEED);
+  _motorHardware.setAcceleration(STEPPER_DIAG_ACCEL);
   
   // 复位位置，确保静止
   _motorHardware.stop();

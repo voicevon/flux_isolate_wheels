@@ -19,10 +19,12 @@ public:
   void handleCommand(const char* payload);
 
 private:
-  // 解析 JSON 命令: {"cmd":"load","counts":[n1,...,n8]}
+  // 解析生产节拍命令的 counts: {"cmd":"load","counts":[n1,...,n8]}
   bool parseCommand(const char* payload);
   // 按业务规则规划各转轮步数并下发运动
   void executeMove();
+  // 单电机调试运动（motor1to8: 托架号 1-8, dir: 1正转/0反转, angleDeg: 角度）
+  void executeDiagMove(uint8_t motor1to8, int dir, float angleDeg);
 
   MotorHardware& _motorHardware;
   ShiftRegisterBus& _spiBus;
@@ -41,6 +43,11 @@ private:
 
   // 电机在当前节拍的目标步数
   long _targetSteps[8];
+
+  // 当前节拍类型: "load" 生产节拍 / "motor" 单机调试（用于 done 应答回带）
+  const char* _beatCmd;
+  // 单机调试节拍标志（完成时需恢复生产速度参数）
+  bool _diagBeat;
 };
 
 #endif // APP_PRODUCTION_H

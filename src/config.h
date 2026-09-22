@@ -32,6 +32,8 @@
 // --- 运动参数 ---
 #define STEPPER_MAX_SPEED     3200.0f   // 最大速度（步/秒）
 #define STEPPER_ACCELERATION  6400.0f   // 加速度（步/秒²）
+#define STEPPER_DIAG_SPEED     800.0f   // 调试模式电机最大速度（步/秒）
+#define STEPPER_DIAG_ACCEL    1600.0f   // 调试模式电机加速度（步/秒²）
 
 // --- 时序参数 ---
 #define DEBOUNCE_MS       50UL  // 按键防抖采样间隔（毫秒）
