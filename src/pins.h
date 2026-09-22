@@ -15,8 +15,8 @@
 #define STEP_PIN_6         33
 #define STEP_PIN_7         32
 
-// AccelStepper 需要的虚拟 DIR 引脚（不实际接线，真实方向经 74HC595 输出）
-#define DUMMY_DIR_PIN      22
+// 方向不经由 GPIO：真实方向由 74HC595 串行锁存输出，
+// FastAccelStepper 不设置方向脚（共享虚拟方向脚会触发库内串行化）
 
 // 驱动芯片使能脚 (EN) 未接 GPIO，直接接地：永远使能，无需软件控制
 
