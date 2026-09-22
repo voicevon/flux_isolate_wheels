@@ -25,6 +25,8 @@ private:
   void executeMove();
   // 单电机调试运动（motor1to8: 托架号 1-8, dir: 1正转/0反转, angleDeg: 角度）
   void executeDiagMove(uint8_t motor1to8, int dir, float angleDeg);
+  // 多电机调试运动（v1.2）: angles[8] 依次为 1~8 号电机角度，0=不动作，负值=反转
+  void executeMultiMove(const float angles[8]);
 
   MotorHardware& _motorHardware;
   ShiftRegisterBus& _spiBus;

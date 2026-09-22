@@ -48,6 +48,35 @@ static bool jsonGetFloat(const String& s, const char* key, float& out) {
   return true;
 }
 
+// 提取数值数组字段（"key":[v1,...,v8]，支持负数与小数），填满 n 个返回 true
+static bool jsonGetFloatArray(const String& s, const char* key, float* out, int n) {
+  int k = s.indexOf(String("\"") + key + "\"");
+  if (k < 0) return false;
+  int arrStart = s.indexOf('[', k);
+  int arrEnd = s.indexOf(']', arrStart);
+  if (arrStart < 0 || arrEnd < 0) return false;
+
+  String arr = s.substring(arrStart + 1, arrEnd);
+  int idx = 0, p = 0, len = arr.length();
+  while (p < len && idx < n) {
+    // 跳过到数字起始（负号/数字）
+    while (p < len && arr[p] != '-' && (arr[p] < '0' || arr[p] > '9')) p++;
+    if (p >= len) break;
+    int start = p;
+    if (arr[p] == '-') p++;
+    bool hasDigit = false, hasDot = false;
+    while (p < len) {
+      char c = arr[p];
+      if (c >= '0' && c <= '9') { p++; hasDigit = true; }
+      else if (c == '.' && !hasDot) { p++; hasDot = true; }
+      else break;
+    }
+    if (!hasDigit) break;
+    out[idx++] = arr.substring(start, p).toFloat();
+  }
+  return idx == n;
+}
+
 AppProduction::AppProduction(MotorHardware& motorHardware, ShiftRegisterBus& spiBus, MqttLink& mqttLink)
   : _motorHardware(motorHardware), _spiBus(spiBus), _mqtt(mqttLink),
     _state(BEAT_IDLE), _beatCmd("load"), _diagBeat(false) {
@@ -128,6 +157,24 @@ void AppProduction::handleCommand(const char* payload) {
       return;
     }
     executeDiagMove((uint8_t)motor, (int)dir, angle);
+  } else if (cmd == "multi") {
+    // 多电机调试命令 (v1.2): {"cmd":"multi","angles":[90,-45,0,...]}，0=不动作，负值=反转
+    float angles[8];
+    if (!jsonGetFloatArray(data, "angles", angles, 8)) {
+      LOG_W("忽略无效的 multi 命令 (angles 须为 8 个数值): %s", payload);
+      return;
+    }
+    bool valid = true;
+    for (int i = 0; i < 8; i++) {
+      if (angles[i] < -360.0f || angles[i] > 360.0f) {
+        LOG_W("multi 命令 %d 号电机角度越界 (%.1f°)，须为 [-360, 360]", i + 1, angles[i]);
+        valid = false;
+      }
+    }
+    if (!valid) {
+      return;
+    }
+    executeMultiMove(angles);
   } else {
     LOG_W("忽略未知命令类型: %s", cmd.c_str());
   }
@@ -254,6 +301,51 @@ void AppProduction::executeDiagMove(uint8_t motor1to8, int dir, float angleDeg) 
 
   _diagBeat = true;
   _beatCmd = "motor";
+  _mqtt.publishState("running");
+  _state = BEAT_RUNNING;
+}
+
+void AppProduction::executeMultiMove(const float angles[8]) {
+  // 调试运动采用低速参数，节拍完成后恢复
+  _motorHardware.setMaxSpeed(STEPPER_DIAG_SPEED);
+  _motorHardware.setAcceleration(STEPPER_DIAG_ACCEL);
+
+  uint8_t dirBits = 0;
+  bool anyMove = false;
+  for (int i = 0; i < 8; i++) {
+    // 角度 → 步数 (1/16 细分下 90° = 800 步)，绝对值换算，符号决定方向
+    float a = angles[i];
+    _targetSteps[i] = (long)(fabsf(a) * (float)STEPS_PER_90DEG / 90.0f + 0.5f);
+    if (_targetSteps[i] > 0) {
+      if (a > 0) {
+        dirBits |= (uint8_t)(1 << i); // 正转该电机位为 1，反转为 0
+      }
+      anyMove = true;
+    }
+  }
+
+  LOG_I("多电机调试: [%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f]°",
+        angles[0], angles[1], angles[2], angles[3],
+        angles[4], angles[5], angles[6], angles[7]);
+  LOG_D("multi 步数: M0=%ld, M1=%ld, M2=%ld, M3=%ld, M4=%ld, M5=%ld, M6=%ld, M7=%ld",
+        _targetSteps[0], _targetSteps[1], _targetSteps[2], _targetSteps[3],
+        _targetSteps[4], _targetSteps[5], _targetSteps[6], _targetSteps[7]);
+
+  // 方向数据一次写入 74HC595（经 DIR_INVERT_MASK 换算物理方向），随后 8 路电机同时启动
+  _spiBus.transfer(dirBits ^ DIR_INVERT_MASK);
+  for (int i = 0; i < 8; i++) {
+    if (_targetSteps[i] > 0) {
+      _motorHardware.startMove(i, _targetSteps[i]);
+    }
+  }
+
+  _diagBeat = true;
+  _beatCmd = "multi";
+  if (!anyMove) {
+    LOG_I("multi: 无电机需要动作。");
+    _state = BEAT_COMPLETED;
+    return;
+  }
   _mqtt.publishState("running");
   _state = BEAT_RUNNING;
 }
