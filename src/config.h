@@ -21,13 +21,18 @@
 
 // --- 步进电机几何参数 ---
 #define MOTOR_FULL_STEPS      200   // 每转整步数（1.8°/步电机）
-#define GEAR_RATIO            1     // 减速比 1:1（托架转轮直驱或 1:1 减速）
+#define GEAR_RATIO            (54.0 / 18.0)   // 减速比 = 从动轮 54 齿 / 主动轮 18 齿 = 3.0
 
-// 旋转度数对应的脉冲步数定义：
-// 90° 所需步数 = (整步数 * 细分 * 减速比) / 4 = 800
+// 旋转度数对应的脉冲步数定义（电机轴步数，减速前）：
+// 90° 所需步数 = (整步数 * 细分 * 减速比) / 4 = 2400
 #define STEPS_PER_90DEG  ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO) / 4)
-// 22.5° 所需步数 = (整步数 * 细分 * 减速比) / 16 = 200
+// 22.5° 所需步数 = (整步数 * 细分 * 减速比) / 16 = 600
 #define STEPS_PER_22_5DEG ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO) / 16)
+
+// --- 逻辑方向 → 物理方向映射 ---
+// 逻辑正转 = 物料输送方向。若某电机因安装朝向与逻辑定义相反，将其对应位置 1（求反）。
+// 位0 = 1号电机 ... 位7 = 8号电机；全部相反填 0xFF；默认全部不反 0x00。
+#define DIR_INVERT_MASK       0b11111111
 
 // --- 运动参数 ---
 #define STEPPER_MAX_SPEED     3200.0f   // 最大速度（步/秒）

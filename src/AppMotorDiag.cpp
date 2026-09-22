@@ -52,8 +52,8 @@ void AppMotorDiag::loop() {
 
     case TEST_MOVE_RIGHT:
       LOG_D("[诊断模式] 电机 M%d 向右旋转 %.2f 圈", _currentMotor, DIAG_TARGET_ROTATIONS);
-      // 设置方向：当前测试电机位为 1 (正转)
-      _spiBus.transfer(1 << _currentMotor);
+      // 设置方向：当前测试电机逻辑正转（位为 1），经掩码换算物理方向
+      _spiBus.transfer((1 << _currentMotor) ^ DIR_INVERT_MASK);
       _motorHardware.startMove(_currentMotor, DIAG_STEPS);
       _testState = TEST_WAIT_RIGHT;
       break;
@@ -74,8 +74,8 @@ void AppMotorDiag::loop() {
 
     case TEST_MOVE_LEFT:
       LOG_D("[诊断模式] 电机 M%d 向左旋转 %.2f 圈", _currentMotor, DIAG_TARGET_ROTATIONS);
-      // 设置方向：所有位为 0 (反转)
-      _spiBus.transfer(0);
+      // 设置方向：所有位为 0 (逻辑反转)，经掩码换算物理方向
+      _spiBus.transfer(0 ^ DIR_INVERT_MASK);
       _motorHardware.startMove(_currentMotor, DIAG_STEPS);
       _testState = TEST_WAIT_LEFT;
       break;

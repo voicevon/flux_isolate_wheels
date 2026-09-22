@@ -209,8 +209,9 @@ void AppProduction::executeMove() {
         _targetSteps[4], _targetSteps[5], _targetSteps[6], _targetSteps[7]);
 
   // 8 路电机各接独立 STEP 引脚，按各自目标步数同时启动；
-  // 全体电机正向旋转，经 74HC595 设置方向数据为 1
-  _spiBus.transfer(0xFF);
+  // 全体电机逻辑正转（输送方向），经 74HC595 设置方向数据为 1，
+  // 再经 DIR_INVERT_MASK 换算为物理方向（安装反向的电机自动求反）
+  _spiBus.transfer(0xFF ^ DIR_INVERT_MASK);
 
   bool anyMove = false;
   for (int i = 0; i < 8; i++) {
@@ -235,7 +236,7 @@ void AppProduction::executeMove() {
 void AppProduction::executeDiagMove(uint8_t motor1to8, int dir, float angleDeg) {
   uint8_t idx = motor1to8 - 1; // 数组索引 0-7
 
-  // 角度 → 步数 (1/16 细分下 90° = 800 步)，支持 22.5 等小数角度
+  // 角度 → 步数 (1/16 细分、3:1 减速下 90° = 2400 步)，支持 22.5 等小数角度
   long steps = (long)(angleDeg * (float)STEPS_PER_90DEG / 90.0f + 0.5f);
 
   LOG_I("调试运动: 电机 %d 号 %s %.1f° (%ld 步)",
@@ -245,8 +246,9 @@ void AppProduction::executeDiagMove(uint8_t motor1to8, int dir, float angleDeg) 
   _motorHardware.setMaxSpeed(STEPPER_DIAG_SPEED);
   _motorHardware.setAcceleration(STEPPER_DIAG_ACCEL);
 
-  // 方向经 74HC595 输出: 正转该电机位为 1，反转为 0
-  _spiBus.transfer(dir ? (1 << idx) : 0);
+  // 方向经 74HC595 输出: 逻辑正转该电机位为 1，反转为 0，
+  // 再经 DIR_INVERT_MASK 换算为物理方向
+  _spiBus.transfer((dir ? (1 << idx) : 0) ^ DIR_INVERT_MASK);
 
   _motorHardware.startMove(idx, steps);
 

@@ -32,7 +32,8 @@ void MqttLink::begin() {
   // 设备 ID：MAC 地址后 4 位十六进制
   WiFi.mode(WIFI_STA);
   String mac = WiFi.macAddress(); // 形如 "C8:F0:9E:04:F8:EC"
-  snprintf(_deviceId, sizeof(_deviceId), "%s", mac.substring(12).c_str());
+  mac.replace(":", "");
+  snprintf(_deviceId, sizeof(_deviceId), "%s", mac.substring(mac.length() - 4).c_str());
   buildTopics();
 
   if (strlen(_ssid) == 0) {
