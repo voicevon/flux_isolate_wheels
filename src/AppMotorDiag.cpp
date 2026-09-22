@@ -19,21 +19,19 @@ void AppMotorDiag::setup() {
   _motorHardware.setMaxSpeed(DIAG_MOTOR_SPEED);
   _motorHardware.setAcceleration(DIAG_MOTOR_ACCEL);
   
-  // 初始屏蔽所有电机，复位位置
-  _motorHardware.setEnableMask(0x00);
+  // 复位位置，确保静止
   _motorHardware.stop();
   _motorHardware.setCurrentPosition(0);
 }
 
 void AppMotorDiag::stop() {
   LOG_I("--- [诊断模式] 电机诊断结束 ---");
-  
+
   // 恢复正常的生产速度和加速度配置
   _motorHardware.setMaxSpeed(STEPPER_MAX_SPEED);
   _motorHardware.setAcceleration(STEPPER_ACCELERATION);
-  
+
   _motorHardware.stop();
-  _motorHardware.setEnableMask(0x00);
 }
 
 void AppMotorDiag::nextMotor() {
@@ -56,8 +54,7 @@ void AppMotorDiag::loop() {
       LOG_D("[诊断模式] 电机 M%d 向右旋转 %.2f 圈", _currentMotor, DIAG_TARGET_ROTATIONS);
       // 设置方向：当前测试电机位为 1 (正转)
       _spiBus.transfer(1 << _currentMotor);
-      _motorHardware.setEnableMask(1 << _currentMotor);
-      _motorHardware.startMove(DIAG_STEPS);
+      _motorHardware.startMove(_currentMotor, DIAG_STEPS);
       _testState = TEST_WAIT_RIGHT;
       break;
 
@@ -79,8 +76,7 @@ void AppMotorDiag::loop() {
       LOG_D("[诊断模式] 电机 M%d 向左旋转 %.2f 圈", _currentMotor, DIAG_TARGET_ROTATIONS);
       // 设置方向：所有位为 0 (反转)
       _spiBus.transfer(0);
-      _motorHardware.setEnableMask(1 << _currentMotor);
-      _motorHardware.startMove(DIAG_STEPS);
+      _motorHardware.startMove(_currentMotor, DIAG_STEPS);
       _testState = TEST_WAIT_LEFT;
       break;
 

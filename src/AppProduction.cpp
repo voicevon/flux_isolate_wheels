@@ -1,33 +1,37 @@
 #include "AppProduction.h"
 #include "MotorHardware.h"
 #include "ShiftRegisterBus.h"
+#include "MqttLink.h"
 #include "config.h"
 #include "pins.h"
 #include "Logger.h"
 #include <Arduino.h>
 
-AppProduction::AppProduction(MotorHardware& motorHardware, ShiftRegisterBus& spiBus)
-  : _motorHardware(motorHardware), _spiBus(spiBus), _state(BEAT_WAIT_DATA), _lastTimeoutPrint(0) {
+// 全局唯一实例指针，供 MQTT 命令回调中转
+static AppProduction* s_production = NULL;
+
+AppProduction::AppProduction(MotorHardware& motorHardware, ShiftRegisterBus& spiBus, MqttLink& mqttLink)
+  : _motorHardware(motorHardware), _spiBus(spiBus), _mqtt(mqttLink),
+    _state(BEAT_IDLE) {
   memset(_asparagusCounts, 0, sizeof(_asparagusCounts));
   memset(_targetSteps, 0, sizeof(_targetSteps));
+  s_production = this;
 }
 
 void AppProduction::setup() {
   LOG_I("--- [生产模式] 启动 ---");
-  _state = BEAT_WAIT_DATA;
-  _lastTimeoutPrint = 0;
+  _state = BEAT_IDLE;
   memset(_asparagusCounts, 0, sizeof(_asparagusCounts));
   memset(_targetSteps, 0, sizeof(_targetSteps));
 
-  // 蓝牙初始化
-  if (!_btSerial.begin("FluxLoader_BT")) {
-    LOG_E("蓝牙初始化失败！");
-  } else {
-    LOG_I("蓝牙已就绪，配对名称: FluxLoader_BT");
-  }
+  // 注册 MQTT 命令回调
+  _mqtt.onCommand([](const char* payload) {
+    if (s_production) {
+      s_production->handleCommand(payload);
+    }
+  });
 
-  // 确保所有电机处于静止且被屏蔽状态
-  _motorHardware.setEnableMask(0x00);
+  // 确保所有电机处于静止状态
   _motorHardware.stop();
   _motorHardware.setCurrentPosition(0);
 
@@ -38,29 +42,54 @@ void AppProduction::setup() {
 
 void AppProduction::stop() {
   LOG_I("--- [生产模式] 结束 ---");
-  _btSerial.end();
   _motorHardware.stop();
-  _motorHardware.setEnableMask(0x00);
+  _mqtt.publishState("idle");
 }
 
-bool AppProduction::parseBluetoothData(const String& data) {
-  // 协议格式: $LOADER,n1,n2,n3,n4,n5,n6,n7,n8
-  // 数据代表 1号到8号 托架上的芦笋数量 (n1是1号, n8是8号)
-  if (!data.startsWith("$LOADER,")) {
+void AppProduction::handleCommand(const char* payload) {
+  if (_state != BEAT_IDLE) {
+    LOG_W("节拍进行中，忽略新命令");
+    return;
+  }
+  if (parseCommand(payload)) {
+    executeMove();
+  } else {
+    LOG_W("忽略无效的 MQTT 命令: %s", payload);
+  }
+}
+
+bool AppProduction::parseCommand(const char* payload) {
+  // 协议: {"cmd":"load","counts":[n1,...,n8]}，n1 为 1 号托架，n8 为 8 号
+  String data(payload);
+  int countsIdx = data.indexOf("\"counts\"");
+  if (countsIdx < 0) {
+    return false;
+  }
+  int arrStart = data.indexOf('[', countsIdx);
+  int arrEnd = data.indexOf(']', arrStart);
+  if (arrStart < 0 || arrEnd < 0) {
     return false;
   }
 
-  // 提取各个转轮的数据
-  int commaIndex = 7; // '$LOADER,' 的末尾
-  for (int i = 0; i < 8; i++) {
-    int nextComma = data.indexOf(',', commaIndex + 1);
-    if (nextComma == -1 && i < 7) {
-      return false; // 逗号数量不足
+  String arr = data.substring(arrStart + 1, arrEnd);
+  int idx = 0;
+  char numBuf[8];
+  int bi = 0;
+  for (unsigned int p = 0; p <= arr.length() && idx < 8; p++) {
+    char c = (p < arr.length()) ? arr[p] : ','; // 末尾补分隔符以收尾最后一个数
+    if (c >= '0' && c <= '9') {
+      if (bi < 7) {
+        numBuf[bi++] = c;
+      }
+    } else if (bi > 0) {
+      numBuf[bi] = 0;
+      _asparagusCounts[idx++] = (uint8_t)atoi(numBuf);
+      bi = 0;
     }
-    String valStr = (i == 7) ? data.substring(commaIndex + 1) : data.substring(commaIndex + 1, nextComma);
-    valStr.trim();
-    _asparagusCounts[i] = valStr.toInt();
-    commaIndex = nextComma;
+  }
+
+  if (idx != 8) {
+    return false;
   }
 
   LOG_I("接收到芦笋数据: 1号=%d, 2号=%d, 3号=%d, 4号=%d, 5号=%d, 6号=%d, 7号=%d, 8号=%d",
@@ -69,7 +98,7 @@ bool AppProduction::parseBluetoothData(const String& data) {
   return true;
 }
 
-void AppProduction::executeTwoPhaseMove() {
+void AppProduction::executeMove() {
   // 根据业务规则判定各转轮的动作步数：
   // 托架编号 1-8，对应数组索引 0-7
 
@@ -104,80 +133,36 @@ void AppProduction::executeTwoPhaseMove() {
         _targetSteps[0], _targetSteps[1], _targetSteps[2], _targetSteps[3],
         _targetSteps[4], _targetSteps[5], _targetSteps[6], _targetSteps[7]);
 
-  // --- 两阶段脉冲控制 ---
-  
-  // 第一阶段：所有需要旋转的电机 (无论 90° 还是 22.5°) 均参与
-  uint8_t phase1Mask = 0;
+  // 8 路电机各接独立 STEP 引脚，按各自目标步数同时启动；
+  // 全体电机正向旋转，经 74HC595 设置方向数据为 1
+  _spiBus.transfer(0xFF);
+
+  bool anyMove = false;
   for (int i = 0; i < 8; i++) {
     if (_targetSteps[i] > 0) {
-      phase1Mask |= (1 << i);
+      _motorHardware.startMove(i, _targetSteps[i]);
+      anyMove = true;
     }
   }
 
-  if (phase1Mask == 0) {
+  if (!anyMove) {
     LOG_I("当前节拍没有电机需要旋转。");
     _state = BEAT_COMPLETED;
     return;
   }
 
-  // 开始第一阶段：走 22.5°
-  _motorHardware.stop();
-  _motorHardware.setCurrentPosition(0);
-  _spiBus.transfer(0xFF); // 全体电机正向旋转，HC595 方向数据设为 1
-  _motorHardware.setEnableMask(phase1Mask);
-  
-  // 以 22.5° 的脉冲数作为目标
-  _motorHardware.startMove(STEPS_PER_22_5DEG);
-  _state = BEAT_PHASE_1_RUN;
+  _mqtt.publishState("running");
+  _state = BEAT_RUNNING;
 }
 
 void AppProduction::loop() {
   switch (_state) {
-    case BEAT_WAIT_DATA: {
-      if (_btSerial.available()) {
-        String data = _btSerial.readStringUntil('\n');
-        data.trim();
-        if (parseBluetoothData(data)) {
-          executeTwoPhaseMove();
-        } else {
-          LOG_W("忽略无效的蓝牙数据格式: %s", data.c_str());
-        }
-      } else {
-        if (millis() - _lastTimeoutPrint >= 5000) {
-          _lastTimeoutPrint = millis();
-          LOG_I("等待手机蓝牙数据...");
-        }
-      }
+    case BEAT_IDLE:
+      // 空闲等待 MQTT 命令 (handleCommand 触发状态迁移)
       break;
-    }
 
-    case BEAT_PHASE_1_RUN: {
-      if (!_motorHardware.isMoving()) {
-        // 第一阶段（22.5°）运动结束，开始第二阶段（补充脉冲）
-        // 只有目标是 90° 的电机需要继续使能
-        uint8_t phase2Mask = 0;
-        for (int i = 0; i < 8; i++) {
-          if (_targetSteps[i] == STEPS_PER_90DEG) {
-            phase2Mask |= (1 << i);
-          }
-        }
-
-        if (phase2Mask != 0) {
-          _motorHardware.setCurrentPosition(0);
-          _motorHardware.setEnableMask(phase2Mask);
-          // 补充 90 - 22.5 = 67.5° 所需步数
-          long remainSteps = STEPS_PER_90DEG - STEPS_PER_22_5DEG;
-          _motorHardware.startMove(remainSteps);
-          _state = BEAT_PHASE_2_RUN;
-        } else {
-          // 没有需要旋转 90° 的电机，节拍已完成
-          _state = BEAT_COMPLETED;
-        }
-      }
-      break;
-    }
-
-    case BEAT_PHASE_2_RUN: {
+    case BEAT_RUNNING: {
+      // 8 路电机各自独立运动，等待全部到位
       if (!_motorHardware.isMoving()) {
         _state = BEAT_COMPLETED;
       }
@@ -185,16 +170,16 @@ void AppProduction::loop() {
     }
 
     case BEAT_COMPLETED: {
-      // 动作结束，关闭所有使能
-      _motorHardware.setEnableMask(0x00);
+      // 动作结束，停止所有电机
       _motorHardware.stop();
 
-      // 向手机发送节拍完成应答
-      _btSerial.println("$DONE");
-      LOG_I("节拍完成，发送 $DONE 给手机");
+      // 发布节拍完成应答
+      _mqtt.publishDone();
+      _mqtt.publishState("idle");
+      LOG_I("节拍完成，已发布 done 应答");
 
       // 重置，进入下一个节拍等待
-      _state = BEAT_WAIT_DATA;
+      _state = BEAT_IDLE;
       break;
     }
   }

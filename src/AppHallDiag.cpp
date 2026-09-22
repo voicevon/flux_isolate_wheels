@@ -17,8 +17,7 @@ void AppHallDiag::setup() {
   _lastPrintTime = 0;
   _lastHomeState = 0xFF;
   
-  // 诊断霍尔时屏蔽所有电机脉冲，保障安全
-  _motorHardware.setEnableMask(0x00);
+  // 确保电机静止，保障安全
   _motorHardware.stop();
 
   pinMode(ENTRANCE_SENSOR_PIN, INPUT_PULLUP);
@@ -31,9 +30,6 @@ void AppHallDiag::stop() {
 }
 
 void AppHallDiag::loop() {
-  // 确保处于屏蔽状态
-  _motorHardware.setEnableMask(0x00);
-  
   // 从 SPI 总线（74HC165）读取当前霍尔状态
   uint8_t home_state = _spiBus.transfer(0x00);
   

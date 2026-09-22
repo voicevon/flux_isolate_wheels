@@ -6,22 +6,27 @@
 #include "MotorHardware.h"
 #include "ShiftRegisterBus.h"
 #include "AppBase.h"
+#include "MqttLink.h"
 #include "AppProduction.h"
 #include "AppMotorDiag.h"
 #include "AppHallDiag.h"
 
 // 电机引脚列表
-const uint8_t motorEnPins[NUM_MOTORS] = {
-  EN_PIN_0, EN_PIN_1, EN_PIN_2, EN_PIN_3,
-  EN_PIN_4, EN_PIN_5, EN_PIN_6, EN_PIN_7
+const uint8_t motorStepPins[NUM_MOTORS] = {
+  STEP_PIN_0, STEP_PIN_1, STEP_PIN_2, STEP_PIN_3,
+  STEP_PIN_4, STEP_PIN_5, STEP_PIN_6, STEP_PIN_7
 };
 
 // 硬件驱动对象
-MotorHardware motorHardware(motorEnPins, NUM_MOTORS);
+MotorHardware motorHardware(motorStepPins);
 ShiftRegisterBus spiBus(LATCH_PIN, CLOCK_PIN, DIR_DATA_OUT, HOME_DATA_IN);
 
+// 通信对象 (WiFi + MQTT)
+MqttLink mqttLink(WIFI_SSID, WIFI_PASSWORD, MQTT_HOST, MQTT_PORT,
+                  MQTT_USER, MQTT_PASS, MQTT_TOPIC_PREFIX);
+
 // APP 实例
-AppProduction appProduction(motorHardware, spiBus);
+AppProduction appProduction(motorHardware, spiBus, mqttLink);
 AppMotorDiag appMotorDiag(motorHardware, spiBus);
 AppHallDiag appHallDiag(motorHardware, spiBus);
 
@@ -92,6 +97,9 @@ void setup() {
   motorHardware.begin(STEPPER_MAX_SPEED, STEPPER_ACCELERATION);
   spiBus.begin();
 
+  // 初始化通信 (WiFi + MQTT，内部非阻塞，断线由 loop 自动重连)
+  mqttLink.begin();
+
   // 默认启动生产模式
   activeApp->setup();
   LOG_I("初始化完成，进入正常生产模式。");
@@ -148,6 +156,9 @@ void loop() {
     }
   }
   lastButtonState = currentButtonState;
+
+  // 维护 WiFi/MQTT 连接与收包
+  mqttLink.loop();
 
   // 运行当前的 APP 逻辑
   if (activeApp) {

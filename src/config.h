@@ -36,4 +36,16 @@
 // --- 时序参数 ---
 #define DEBOUNCE_MS       50UL  // 按键防抖采样间隔（毫秒）
 
+// ============================================================================
+// 通信配置：WiFi + MQTT（蓝牙已移除，经典蓝牙与 WiFi 不能共存）
+// ============================================================================
+#define WIFI_SSID         ""      // TODO: 填入 WiFi 名称
+#define WIFI_PASSWORD     ""      // TODO: 填入 WiFi 密码
+
+#define MQTT_HOST         "voicevon.vicp.io"
+#define MQTT_PORT         1883
+#define MQTT_USER         "von"
+#define MQTT_PASS         "von123456"
+#define MQTT_TOPIC_PREFIX "flux/loader"   // 主题前缀，设备 ID (MAC后4位) 自动追加
+
 #endif // CONFIG_H
