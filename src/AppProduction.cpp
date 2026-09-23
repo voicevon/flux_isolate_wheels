@@ -79,9 +79,13 @@ static bool jsonGetFloatArray(const String& s, const char* key, float* out, int 
 
 AppProduction::AppProduction(MotorHardware& motorHardware, ShiftRegisterBus& spiBus, MqttLink& mqttLink)
   : _motorHardware(motorHardware), _spiBus(spiBus), _mqtt(mqttLink),
-    _state(BEAT_IDLE), _beatCmd("load"), _diagBeat(false) {
+    _state(BEAT_IDLE), _beatCmd("load"), _diagBeat(false), _currentBeat(0) {
   memset(_asparagusCounts, 0, sizeof(_asparagusCounts));
   memset(_targetSteps, 0, sizeof(_targetSteps));
+  memset(_beatSteps, 0, sizeof(_beatSteps));
+  for (int i = 0; i < 8; i++) {
+    _carrierState[i] = CARRIER_FREE;
+  }
   s_production = this;
 }
 
@@ -90,8 +94,14 @@ void AppProduction::setup() {
   _state = BEAT_IDLE;
   _beatCmd = "load";
   _diagBeat = false;
+  _currentBeat = 0;
   memset(_asparagusCounts, 0, sizeof(_asparagusCounts));
   memset(_targetSteps, 0, sizeof(_targetSteps));
+  memset(_beatSteps, 0, sizeof(_beatSteps));
+  // 托架状态上电初始化一次：全部自由（后续 load 不再整体重置）
+  for (int i = 0; i < 8; i++) {
+    _carrierState[i] = CARRIER_FREE;
+  }
 
   // 注册 MQTT 命令回调
   _mqtt.onCommand([](const char* payload) {
@@ -183,35 +193,18 @@ void AppProduction::handleCommand(const char* payload) {
 bool AppProduction::parseCommand(const char* payload) {
   // 协议: {"cmd":"load","counts":[n1,...,n8]}，n1 为 1 号托架，n8 为 8 号
   String data(payload);
-  int countsIdx = data.indexOf("\"counts\"");
-  if (countsIdx < 0) {
-    return false;
-  }
-  int arrStart = data.indexOf('[', countsIdx);
-  int arrEnd = data.indexOf(']', arrStart);
-  if (arrStart < 0 || arrEnd < 0) {
+  float values[8];
+  if (!jsonGetFloatArray(data, "counts", values, 8)) {
     return false;
   }
 
-  String arr = data.substring(arrStart + 1, arrEnd);
-  int idx = 0;
-  char numBuf[8];
-  int bi = 0;
-  for (unsigned int p = 0; p <= arr.length() && idx < 8; p++) {
-    char c = (p < arr.length()) ? arr[p] : ','; // 末尾补分隔符以收尾最后一个数
-    if (c >= '0' && c <= '9') {
-      if (bi < 7) {
-        numBuf[bi++] = c;
-      }
-    } else if (bi > 0) {
-      numBuf[bi] = 0;
-      _asparagusCounts[idx++] = (uint8_t)atoi(numBuf);
-      bi = 0;
+  // 校验：每个值须为 0~255 的整数，越界或带小数则整帧忽略
+  for (int i = 0; i < 8; i++) {
+    if (values[i] < 0.0f || values[i] > 255.0f || values[i] != (long)values[i]) {
+      LOG_W("counts[%d] 非法 (%.2f)，须为 0~255 整数，忽略整帧", i + 1, values[i]);
+      return false;
     }
-  }
-
-  if (idx != 8) {
-    return false;
+    _asparagusCounts[i] = (uint8_t)values[i];
   }
 
   LOG_I("接收到芦笋数据: 1号=%d, 2号=%d, 3号=%d, 4号=%d, 5号=%d, 6号=%d, 7号=%d, 8号=%d",
@@ -220,64 +213,179 @@ bool AppProduction::parseCommand(const char* payload) {
   return true;
 }
 
-void AppProduction::executeMove() {
-  // 根据业务规则判定各转轮的动作步数：
-  // 托架编号 1-8，对应数组索引 0-7
+void AppProduction::planBeats() {
+  // 托架状态机规划（doc/节拍逻辑.md 第4节）
+  // 托架编号 1-8 对应索引 0-7；右邻 = 编号减一 (i-1)，左邻 = 编号加一 (i+1)
+  memset(_beatSteps, 0, sizeof(_beatSteps));
 
-  // 1. 1号转轮固定旋转 90° (索引 0)
-  _targetSteps[0] = STEPS_PER_90DEG;
+  static const char* kStateNames[] = {
+    "自由", "上岗", "接客", "美妙", "超载", "锁定", "轮回"
+  };
 
-  // 2. 2号至8号转轮 (索引 i = 1 至 7)
-  for (int i = 1; i < 8; i++) {
-    uint8_t rightNeighborCount = _asparagusCounts[i - 1]; // 它的右侧相邻是 i-1 号
+  // ⑥ 上游锁定（不递归）：记录本次判定中由 ②/③ 产生的锁定，
+  // ⑥ 新产生的锁定不置位，避免向更上游传导
+  bool primaryLocked[8] = { false, false, false, false, false, false, false, false };
+
+  // 打印本次 load 判定前的托架当前状态
+  LOG_D("load 时状态: 1号=%s, 2号=%s, 3号=%s, 4号=%s, 5号=%s, 6号=%s, 7号=%s, 8号=%s",
+        kStateNames[_carrierState[0]], kStateNames[_carrierState[1]],
+        kStateNames[_carrierState[2]], kStateNames[_carrierState[3]],
+        kStateNames[_carrierState[4]], kStateNames[_carrierState[5]],
+        kStateNames[_carrierState[6]], kStateNames[_carrierState[7]]);
+
+  for (int i = 0; i < 8; i++) {
     uint8_t selfCount = _asparagusCounts[i];
+    uint8_t rightCount = (i > 0) ? _asparagusCounts[i - 1] : 0;
+    uint8_t leftCount = (i < 7) ? _asparagusCounts[i + 1] : 0;
+    CarrierState st = _carrierState[i];
 
-    if (rightNeighborCount >= 1) {
-      // 右侧有芦笋，停止不动作
-      _targetSteps[i] = 0;
-    } else {
-      // 右侧无芦笋，看自身状态
+    // 超载/轮回不参与重新判定（超载当拍即转轮回；轮回在节拍1完成后按 ⑤ 处理）
+    if (st == CARRIER_OVERLOAD || st == CARRIER_SAMSARA) {
+      continue;
+    }
+
+    // 锁定无条件回自由（下次 load），随后按 ① 重新判定
+    if (st == CARRIER_LOCKED) {
+      st = CARRIER_FREE;
+    }
+
+    bool lockedBy23 = false;  // 本次判定是否被 ②/③ 锁定
+
+    // ① 按自身芦笋数量（自由/上岗均参与判定：上岗轮传感器显示有料时
+    // 同样转美妙/超载，避免带料的上岗轮永远不出料）
+    if (st == CARRIER_FREE || st == CARRIER_ON_DUTY) {
       if (selfCount == 0) {
-        // 自身也为空，旋转 90°
-        _targetSteps[i] = STEPS_PER_90DEG;
+        st = CARRIER_ON_DUTY;
       } else if (selfCount == 1) {
-        // 自身有 1 个物料，旋转 90°
-        _targetSteps[i] = STEPS_PER_90DEG;
+        st = CARRIER_WONDERFUL;
       } else {
-        // 自身有多个物料 (>= 2)，旋转 22.5°
-        _targetSteps[i] = STEPS_PER_22_5DEG;
+        st = CARRIER_OVERLOAD;
       }
     }
+
+    // ② 上岗：先判锁定（右邻>0，优先），再判接客（右邻=0 且 左邻>0）
+    if (st == CARRIER_ON_DUTY) {
+      if (rightCount > 0) {
+        st = CARRIER_LOCKED;
+        lockedBy23 = true;
+      } else if (leftCount > 0) {
+        st = CARRIER_GUEST;
+      }
+    }
+
+    // ③ 右邻有料：美妙/接客/超载统一覆盖为锁定
+    if ((st == CARRIER_WONDERFUL || st == CARRIER_GUEST || st == CARRIER_OVERLOAD) &&
+        rightCount > 0) {
+      st = CARRIER_LOCKED;
+      lockedBy23 = true;
+    }
+
+    // ④ 超载无条件转轮回
+    if (st == CARRIER_OVERLOAD) {
+      st = CARRIER_SAMSARA;
+    }
+
+    // ⑥ 上游锁定（不递归）：右邻被 ②/③ 锁定（被锁定的空轮）时，
+    // 有料托架本拍不得投料，避免把物料投到不动的轮子上；
+    // ⑥ 产生的锁定不置 primaryLocked，不向更上游传导
+    if ((st == CARRIER_WONDERFUL || st == CARRIER_SAMSARA) &&
+        i > 0 && primaryLocked[i - 1]) {
+      st = CARRIER_LOCKED;
+      LOG_D("托架%d: ⑥ 右邻被锁定，本拍不投料", i + 1);
+    }
+
+    _carrierState[i] = st;
+    primaryLocked[i] = lockedBy23;
+
+    // 节拍动作（表中角度为绝对位置，换算为各拍增量步数）
+    switch (st) {
+      case CARRIER_GUEST:
+        _beatSteps[0][i] = STEPS_PER_30DEG;  // 拍1 → 绝对 30°
+        _beatSteps[1][i] = STEPS_PER_60DEG;  // 拍2 30°→90°（到位）
+        break;
+      case CARRIER_WONDERFUL:
+        _beatSteps[0][i] = STEPS_PER_60DEG;  // 拍1 → 绝对 60°
+        _beatSteps[2][i] = STEPS_PER_30DEG;  // 拍3 60°→90°（到位）
+        break;
+      case CARRIER_SAMSARA:
+        _beatSteps[0][i] = STEPS_PER_60DEG;  // 拍1 → 绝对 60°
+        break;
+      default:
+        break;  // 锁定/上岗不动作
+    }
+
+    LOG_D("托架%d: 数量=%d 右邻=%d 左邻=%d → %s",
+          i + 1, selfCount, rightCount, leftCount, kStateNames[st]);
   }
 
-  // 打印本次节拍的运动步数规划
-  LOG_D("节拍运动步数: M0=%ld, M1=%ld, M2=%ld, M3=%ld, M4=%ld, M5=%ld, M6=%ld, M7=%ld",
-        _targetSteps[0], _targetSteps[1], _targetSteps[2], _targetSteps[3],
-        _targetSteps[4], _targetSteps[5], _targetSteps[6], _targetSteps[7]);
+  for (int b = 0; b < 3; b++) {
+    LOG_D("节拍%d 步数: M0=%ld, M1=%ld, M2=%ld, M3=%ld, M4=%ld, M5=%ld, M6=%ld, M7=%ld",
+          b + 1, _beatSteps[b][0], _beatSteps[b][1], _beatSteps[b][2], _beatSteps[b][3],
+          _beatSteps[b][4], _beatSteps[b][5], _beatSteps[b][6], _beatSteps[b][7]);
+  }
+}
 
-  // 8 路电机各接独立 STEP 引脚，按各自目标步数同时启动；
-  // 全体电机逻辑正转（输送方向），经 74HC595 设置方向数据为 1，
-  // 再经 DIR_INVERT_MASK 换算为物理方向（安装反向的电机自动求反）
+void AppProduction::startBeat(uint8_t beat) {
+  // 全体电机逻辑正转（输送方向），经 74HC595 一次写入方向数据
+  //（0xFF 经 DIR_INVERT_MASK 换算为物理方向），随后 8 路同时启动。
+  // 启动循环内不得插入 LOG_I（阻塞式 MQTT 发送会把各路启动时刻拉开 ~10ms）
   _spiBus.transfer(0xFF ^ DIR_INVERT_MASK);
-
-  bool anyMove = false;
   for (int i = 0; i < 8; i++) {
-    if (_targetSteps[i] > 0) {
-      _motorHardware.startMove(i, _targetSteps[i]);
-      anyMove = true;
+    if (_beatSteps[beat][i] > 0) {
+      _motorHardware.startMove(i, _beatSteps[beat][i]);
+    }
+  }
+}
+
+void AppProduction::applyBeatTransitions(uint8_t beat) {
+  for (int i = 0; i < 8; i++) {
+    uint8_t rightCount = (i > 0) ? _asparagusCounts[i - 1] : 0;
+    switch (beat) {
+      case 0:  // 节拍1完成：轮回按 ⑤ 判定（右邻有料→锁定，否则→自由）
+        if (_carrierState[i] == CARRIER_SAMSARA) {
+          _carrierState[i] = (rightCount > 0) ? CARRIER_LOCKED : CARRIER_FREE;
+        }
+        break;
+      case 1:  // 节拍2完成：接客到位 → 自由
+        if (_carrierState[i] == CARRIER_GUEST) {
+          _carrierState[i] = CARRIER_FREE;
+        }
+        break;
+      case 2:  // 节拍3完成：美妙到位 → 自由
+        if (_carrierState[i] == CARRIER_WONDERFUL) {
+          _carrierState[i] = CARRIER_FREE;
+        }
+        break;
+    }
+  }
+}
+
+void AppProduction::executeMove() {
+  planBeats();
+
+  _beatCmd = "load";
+  _currentBeat = 0;
+
+  // 三拍全 0（如全部上岗）：无需动作，直接完成
+  bool anyMove = false;
+  for (int b = 0; b < 3 && !anyMove; b++) {
+    for (int i = 0; i < 8; i++) {
+      if (_beatSteps[b][i] > 0) {
+        anyMove = true;
+        break;
+      }
     }
   }
 
   if (!anyMove) {
     LOG_I("当前节拍没有电机需要旋转。");
-    _beatCmd = "load";
     _state = BEAT_COMPLETED;
     return;
   }
 
-  _beatCmd = "load";
   _mqtt.publishState("running");
   _state = BEAT_RUNNING;
+  startBeat(0);
 }
 
 void AppProduction::executeDiagMove(uint8_t motor1to8, int dir, float angleDeg) {
@@ -369,16 +477,33 @@ void AppProduction::loop() {
       break;
 
     case BEAT_RUNNING: {
-      // 8 路电机各自独立运动，等待全部到位；同时记录每台停止时刻 (诊断并行性)
-      static bool _prevRunning[NUM_MOTORS] = {false};
-      for (int i = 0; i < NUM_MOTORS; i++) {
-        bool r = _motorHardware.isMotorRunning(i);
-        if (_prevRunning[i] && !r) {
-          LOG_I("  M%d 停止 @ t=%lu us", i, micros());
-        }
-        _prevRunning[i] = r;
+      // 等待当前节拍内全部电机到位
+      if (_motorHardware.isMoving()) {
+        break;
       }
-      if (!_motorHardware.isMoving()) {
+      LOG_I("节拍%d 完成", _currentBeat + 1);
+
+      // 拍间托架状态转移
+      applyBeatTransitions(_currentBeat);
+      _currentBeat++;
+
+      // 启动下一节拍；全零节拍直接跳过（仍执行拍间转移）
+      bool started = false;
+      while (_currentBeat < 3) {
+        long total = 0;
+        for (int i = 0; i < 8; i++) {
+          total += _beatSteps[_currentBeat][i];
+        }
+        if (total > 0) {
+          startBeat(_currentBeat);
+          started = true;
+          break;
+        }
+        applyBeatTransitions(_currentBeat);
+        _currentBeat++;
+      }
+
+      if (!started) {
         _state = BEAT_COMPLETED;
       }
       break;

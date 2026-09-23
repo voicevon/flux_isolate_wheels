@@ -26,8 +26,10 @@
 // 旋转度数对应的脉冲步数定义（电机轴步数，减速前）：
 // 90° 所需步数 = (整步数 * 细分 * 减速比) / 4 = 2400
 #define STEPS_PER_90DEG  ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO) / 4)
-// 22.5° 所需步数 = (整步数 * 细分 * 减速比) / 16 = 600
-#define STEPS_PER_22_5DEG ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO) / 16)
+// 60° 所需步数 = (整步数 * 细分 * 减速比) / 6 = 1600
+#define STEPS_PER_60DEG  ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO) / 6)
+// 30° 所需步数 = (整步数 * 细分 * 减速比) / 12 = 800
+#define STEPS_PER_30DEG  ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO) / 12)
 
 // --- 逻辑方向 → 物理方向映射 ---
 // 逻辑正转 = 物料输送方向。若某电机因安装朝向与逻辑定义相反，将其对应位置 1（求反）。
