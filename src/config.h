@@ -30,6 +30,10 @@
 #define STEPS_PER_60DEG  ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO) / 6)
 // 30° 所需步数 = (整步数 * 细分 * 减速比) / 12 = 800
 #define STEPS_PER_30DEG  ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO) / 12)
+// 28° = 9600 * 28 / 360 ≈ 747 步（四舍五入）
+#define STEPS_PER_28DEG  ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO * 28.0 / 360.0 + 0.5))
+// 32° = 9600 * 32 / 360 ≈ 853 步（四舍五入）
+#define STEPS_PER_32DEG  ((long)(MOTOR_FULL_STEPS * MICROSTEP_RESOLUTION * GEAR_RATIO * 32.0 / 360.0 + 0.5))
 
 // --- 逻辑方向 → 物理方向映射 ---
 // 逻辑正转 = 物料输送方向。若某电机因安装朝向与逻辑定义相反，将其对应位置 1（求反）。

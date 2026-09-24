@@ -84,7 +84,8 @@ AppProduction::AppProduction(MotorHardware& motorHardware, ShiftRegisterBus& spi
   memset(_targetSteps, 0, sizeof(_targetSteps));
   memset(_beatSteps, 0, sizeof(_beatSteps));
   for (int i = 0; i < 8; i++) {
-    _carrierState[i] = CARRIER_FREE;
+    _carrierState[i] = CARRIER_LOCKED;
+    _nextState[i] = CARRIER_LOCKED;
   }
   s_production = this;
 }
@@ -98,9 +99,10 @@ void AppProduction::setup() {
   memset(_asparagusCounts, 0, sizeof(_asparagusCounts));
   memset(_targetSteps, 0, sizeof(_targetSteps));
   memset(_beatSteps, 0, sizeof(_beatSteps));
-  // 托架状态上电初始化一次：全部自由（后续 load 不再整体重置）
+  // 托架状态上电初始化一次：全部锁定（后续 load 不再整体重置）
   for (int i = 0; i < 8; i++) {
-    _carrierState[i] = CARRIER_FREE;
+    _carrierState[i] = CARRIER_LOCKED;
+    _nextState[i] = CARRIER_LOCKED;
   }
 
   // 注册 MQTT 命令回调
@@ -214,17 +216,18 @@ bool AppProduction::parseCommand(const char* payload) {
 }
 
 void AppProduction::planBeats() {
-  // 托架状态机规划（doc/节拍逻辑.md 第4节）
-  // 托架编号 1-8 对应索引 0-7；右邻 = 编号减一 (i-1)，左邻 = 编号加一 (i+1)
+  // 托架状态机规划（doc/节拍状态图.md，配对判定）
+  // 供方 k（2~8号，索引1~7）与接收方 k-1（其右侧）成对产生动作：
+  //   成对条件 = 接收方处于锁定 且 接收方为空(count=0)
+  //              且 接收方的右侧(k-2号)无料（即接收方"可以解锁"）
+  //   锁定+count=1 → 美妙+接美妙；锁定+count≥2 → 超载+接超载；转世 → 新生+接新生
+  //   不成对则整对不产生：供方保持原状态，双方本拍均不动
+  //   1号轮右侧为出料口（虚拟接收位，永远为空、可解锁）：1号轮永远可配对出料
   memset(_beatSteps, 0, sizeof(_beatSteps));
 
   static const char* kStateNames[] = {
-    "自由", "上岗", "接客", "美妙", "超载", "锁定", "轮回"
+    "锁定", "转世", "美妙", "接美妙", "超载", "接超载", "新生", "接新生"
   };
-
-  // ⑥ 上游锁定（不递归）：记录本次判定中由 ②/③ 产生的锁定，
-  // ⑥ 新产生的锁定不置位，避免向更上游传导
-  bool primaryLocked[8] = { false, false, false, false, false, false, false, false };
 
   // 打印本次 load 判定前的托架当前状态
   LOG_D("load 时状态: 1号=%s, 2号=%s, 3号=%s, 4号=%s, 5号=%s, 6号=%s, 7号=%s, 8号=%s",
@@ -233,89 +236,81 @@ void AppProduction::planBeats() {
         kStateNames[_carrierState[4]], kStateNames[_carrierState[5]],
         kStateNames[_carrierState[6]], kStateNames[_carrierState[7]]);
 
+  // 判定结果（含配对产生的动作态），默认全部保持原状态
+  CarrierState judged[8];
   for (int i = 0; i < 8; i++) {
-    uint8_t selfCount = _asparagusCounts[i];
-    uint8_t rightCount = (i > 0) ? _asparagusCounts[i - 1] : 0;
-    uint8_t leftCount = (i < 7) ? _asparagusCounts[i + 1] : 0;
-    CarrierState st = _carrierState[i];
+    judged[i] = _carrierState[i];
+    _nextState[i] = _carrierState[i];
+  }
 
-    // 超载/轮回不参与重新判定（超载当拍即转轮回；轮回在节拍1完成后按 ⑤ 处理）
-    if (st == CARRIER_OVERLOAD || st == CARRIER_SAMSARA) {
+  // 逐供方判定（配对各占一个供方+一个接收方，互不重叠，扫描顺序无关）
+  for (int i = 0; i < 8; i++) {
+    CarrierState st = _carrierState[i];
+    int r = i - 1;
+    bool donorMaterial = (st == CARRIER_LOCKED && _asparagusCounts[i] >= 1);
+    bool donorSamsara = (st == CARRIER_SAMSARA);
+    if (!donorMaterial && !donorSamsara) {
+      continue;  // 锁定无料：保持锁定
+    }
+
+    // 1号轮（i=0）的接收位是出料口，永远可用；其余供方检查真实接收方
+    bool canPair = (i == 0) ||
+                   ((_carrierState[r] == CARRIER_LOCKED) &&
+                    (_asparagusCounts[r] == 0) &&
+                    (r == 0 || _asparagusCounts[r - 1] == 0));
+    if (!canPair) {
+      LOG_D("托架%d: 配对失败（接收方%d不可用），保持%s",
+            i + 1, r + 1, kStateNames[st]);
       continue;
     }
 
-    // 锁定无条件回自由（下次 load），随后按 ① 重新判定
-    if (st == CARRIER_LOCKED) {
-      st = CARRIER_FREE;
-    }
-
-    bool lockedBy23 = false;  // 本次判定是否被 ②/③ 锁定
-
-    // ① 按自身芦笋数量（自由/上岗均参与判定：上岗轮传感器显示有料时
-    // 同样转美妙/超载，避免带料的上岗轮永远不出料）
-    if (st == CARRIER_FREE || st == CARRIER_ON_DUTY) {
-      if (selfCount == 0) {
-        st = CARRIER_ON_DUTY;
-      } else if (selfCount == 1) {
-        st = CARRIER_WONDERFUL;
-      } else {
-        st = CARRIER_OVERLOAD;
-      }
-    }
-
-    // ② 上岗：先判锁定（右邻>0，优先），再判接客（右邻=0 且 左邻>0）
-    if (st == CARRIER_ON_DUTY) {
-      if (rightCount > 0) {
-        st = CARRIER_LOCKED;
-        lockedBy23 = true;
-      } else if (leftCount > 0) {
-        st = CARRIER_GUEST;
-      }
-    }
-
-    // ③ 右邻有料：美妙/接客/超载统一覆盖为锁定
-    if ((st == CARRIER_WONDERFUL || st == CARRIER_GUEST || st == CARRIER_OVERLOAD) &&
-        rightCount > 0) {
-      st = CARRIER_LOCKED;
-      lockedBy23 = true;
-    }
-
-    // ④ 超载无条件转轮回
-    if (st == CARRIER_OVERLOAD) {
-      st = CARRIER_SAMSARA;
-    }
-
-    // ⑥ 上游锁定（不递归）：右邻被 ②/③ 锁定（被锁定的空轮）时，
-    // 有料托架本拍不得投料，避免把物料投到不动的轮子上；
-    // ⑥ 产生的锁定不置 primaryLocked，不向更上游传导
-    if ((st == CARRIER_WONDERFUL || st == CARRIER_SAMSARA) &&
-        i > 0 && primaryLocked[i - 1]) {
-      st = CARRIER_LOCKED;
-      LOG_D("托架%d: ⑥ 右邻被锁定，本拍不投料", i + 1);
-    }
-
-    _carrierState[i] = st;
-    primaryLocked[i] = lockedBy23;
-
-    // 节拍动作（表中角度为绝对位置，换算为各拍增量步数）
     switch (st) {
-      case CARRIER_GUEST:
-        _beatSteps[0][i] = STEPS_PER_30DEG;  // 拍1 → 绝对 30°
-        _beatSteps[1][i] = STEPS_PER_60DEG;  // 拍2 30°→90°（到位）
-        break;
-      case CARRIER_WONDERFUL:
-        _beatSteps[0][i] = STEPS_PER_60DEG;  // 拍1 → 绝对 60°
-        _beatSteps[2][i] = STEPS_PER_30DEG;  // 拍3 60°→90°（到位）
+      case CARRIER_LOCKED:
+        if (_asparagusCounts[i] == 1) {
+          // 美妙（+接美妙）
+          judged[i] = CARRIER_WONDERFUL;
+          _beatSteps[0][i] = STEPS_PER_60DEG;  // 拍1 旋转60°
+          _beatSteps[2][i] = STEPS_PER_30DEG;  // 拍3 旋转30°
+          _nextState[i] = CARRIER_LOCKED;
+          if (i > 0) {
+            judged[r] = CARRIER_ACCEPT_WONDERFUL;
+            _beatSteps[0][r] = STEPS_PER_30DEG;  // 拍1 旋转30°
+            _beatSteps[1][r] = STEPS_PER_60DEG;  // 拍2 旋转60°
+            _nextState[r] = CARRIER_LOCKED;
+          }
+        } else {
+          // 超载（+接超载）
+          judged[i] = CARRIER_OVERLOAD;
+          _beatSteps[0][i] = STEPS_PER_28DEG;  // 拍1 旋转28°
+          _nextState[i] = CARRIER_SAMSARA;     // → 转世
+          if (i > 0) {
+            judged[r] = CARRIER_ACCEPT_OVERLOAD;
+            _beatSteps[1][r] = STEPS_PER_90DEG;  // 拍2 旋转90°
+            _nextState[r] = CARRIER_LOCKED;
+          }
+        }
         break;
       case CARRIER_SAMSARA:
-        _beatSteps[0][i] = STEPS_PER_60DEG;  // 拍1 → 绝对 60°
+        // 新生（+接新生）
+        judged[i] = CARRIER_NEWBORN;
+        _beatSteps[0][i] = STEPS_PER_32DEG;    // 拍1 旋转32°
+        _beatSteps[2][i] = STEPS_PER_30DEG;    // 拍3 旋转30°
+        _nextState[i] = CARRIER_LOCKED;
+        if (i > 0) {
+          judged[r] = CARRIER_ACCEPT_NEWBORN;
+          _beatSteps[0][r] = STEPS_PER_30DEG;  // 拍1 旋转30°
+          _beatSteps[1][r] = STEPS_PER_60DEG;  // 拍2 旋转60°
+          _nextState[r] = CARRIER_LOCKED;
+        }
         break;
       default:
-        break;  // 锁定/上岗不动作
+        break;
     }
+  }
 
-    LOG_D("托架%d: 数量=%d 右邻=%d 左邻=%d → %s",
-          i + 1, selfCount, rightCount, leftCount, kStateNames[st]);
+  for (int i = 0; i < 8; i++) {
+    LOG_D("托架%d: 数量=%d → %s",
+          i + 1, _asparagusCounts[i], kStateNames[judged[i]]);
   }
 
   for (int b = 0; b < 3; b++) {
@@ -338,25 +333,12 @@ void AppProduction::startBeat(uint8_t beat) {
 }
 
 void AppProduction::applyBeatTransitions(uint8_t beat) {
+  // 新状态机无拍间转移；三拍结束（拍3完成或被跳过）时统一落位整备C终态
+  if (beat != 2) {
+    return;
+  }
   for (int i = 0; i < 8; i++) {
-    uint8_t rightCount = (i > 0) ? _asparagusCounts[i - 1] : 0;
-    switch (beat) {
-      case 0:  // 节拍1完成：轮回按 ⑤ 判定（右邻有料→锁定，否则→自由）
-        if (_carrierState[i] == CARRIER_SAMSARA) {
-          _carrierState[i] = (rightCount > 0) ? CARRIER_LOCKED : CARRIER_FREE;
-        }
-        break;
-      case 1:  // 节拍2完成：接客到位 → 自由
-        if (_carrierState[i] == CARRIER_GUEST) {
-          _carrierState[i] = CARRIER_FREE;
-        }
-        break;
-      case 2:  // 节拍3完成：美妙到位 → 自由
-        if (_carrierState[i] == CARRIER_WONDERFUL) {
-          _carrierState[i] = CARRIER_FREE;
-        }
-        break;
-    }
+    _carrierState[i] = _nextState[i];
   }
 }
 
@@ -379,6 +361,7 @@ void AppProduction::executeMove() {
 
   if (!anyMove) {
     LOG_I("当前节拍没有电机需要旋转。");
+    applyBeatTransitions(2);  // 无动作仍需落位整备C终态
     _state = BEAT_COMPLETED;
     return;
   }
