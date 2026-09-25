@@ -5,15 +5,15 @@
 // ESP32 引脚定义 (8路独立 STEP, EN 接地常使能, 74HC595/165 串行 DIR/HOME)
 // ============================================================================
 
-// --- 8路独立 STEP 引脚 (STEP0-STEP7 依次为) ---
-#define STEP_PIN_0         13
-#define STEP_PIN_1         12
-#define STEP_PIN_2         14
-#define STEP_PIN_3         27
-#define STEP_PIN_4         26
-#define STEP_PIN_5         25
-#define STEP_PIN_6         33
-#define STEP_PIN_7         32
+// --- 8路独立 STEP 引脚 (硬件排线首路为 8 号轮，与 74HC595 输出 Q0~Q7 → 轮 8~1 一致) ---
+#define STEP_PIN_0         32
+#define STEP_PIN_1         33
+#define STEP_PIN_2         25
+#define STEP_PIN_3         26
+#define STEP_PIN_4         27
+#define STEP_PIN_5         14
+#define STEP_PIN_6         12
+#define STEP_PIN_7         13
 
 // 方向不经由 GPIO：真实方向由 74HC595 串行锁存输出，
 // FastAccelStepper 不设置方向脚（共享虚拟方向脚会触发库内串行化）
