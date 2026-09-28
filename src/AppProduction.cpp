@@ -217,12 +217,12 @@ bool AppProduction::parseCommand(const char* payload) {
 
 void AppProduction::planBeats() {
   // 托架状态机规划（doc/节拍状态图.md，配对判定）
-  // 供方 k（2~8号，索引1~7）与接收方 k-1（其右侧）成对产生动作：
+  // 供方 k（1~7号，索引0~6）与接收方 k+1（其右侧相邻轮，索引1~7）成对产生动作：
   //   成对条件 = 接收方处于锁定 且 接收方为空(count=0)
-  //              且 接收方的右侧(k-2号)无料（即接收方"可以解锁"）
+  //              且 接收方的右侧(k+2号)无料（即接收方"可以解锁"）
   //   锁定+count=1 → 美妙+接美妙；锁定+count≥2 → 超载+接超载；转世 → 新生+接新生
   //   不成对则整对不产生：供方保持原状态，双方本拍均不动
-  //   1号轮右侧为出料口（虚拟接收位，永远为空、可解锁）：1号轮永远可配对出料
+  //   8号轮右侧为出料口（虚拟接收位，永远为空、可解锁）：8号轮永远可配对出料
   memset(_beatSteps, 0, sizeof(_beatSteps));
 
   static const char* kStateNames[] = {
@@ -246,18 +246,18 @@ void AppProduction::planBeats() {
   // 逐供方判定（配对各占一个供方+一个接收方，互不重叠，扫描顺序无关）
   for (int i = 0; i < 8; i++) {
     CarrierState st = _carrierState[i];
-    int r = i - 1;
+    int r = i + 1;  // 接收方为其右侧相邻轮 (编号加一)
     bool donorMaterial = (st == CARRIER_LOCKED && _asparagusCounts[i] >= 1);
     bool donorSamsara = (st == CARRIER_SAMSARA);
     if (!donorMaterial && !donorSamsara) {
       continue;  // 锁定无料：保持锁定
     }
 
-    // 1号轮（i=0）的接收位是出料口，永远可用；其余供方检查真实接收方
-    bool canPair = (i == 0) ||
+    // 8号轮（i=7）的接收位是出料口，永远可用；其余供方检查真实接收方
+    bool canPair = (i == 7) ||
                    ((_carrierState[r] == CARRIER_LOCKED) &&
                     (_asparagusCounts[r] == 0) &&
-                    (r == 0 || _asparagusCounts[r - 1] == 0));
+                    (r == 7 || _asparagusCounts[r + 1] == 0));
     if (!canPair) {
       LOG_D("托架%d: 配对失败（接收方%d不可用），保持%s",
             i + 1, r + 1, kStateNames[st]);
@@ -272,7 +272,7 @@ void AppProduction::planBeats() {
           _beatSteps[0][i] = STEPS_PER_60DEG;  // 拍1 旋转60°
           _beatSteps[2][i] = STEPS_PER_30DEG;  // 拍3 旋转30°
           _nextState[i] = CARRIER_LOCKED;
-          if (i > 0) {
+          if (i < 7) {
             judged[r] = CARRIER_ACCEPT_WONDERFUL;
             _beatSteps[0][r] = STEPS_PER_30DEG;  // 拍1 旋转30°
             _beatSteps[1][r] = STEPS_PER_60DEG;  // 拍2 旋转60°
@@ -283,7 +283,7 @@ void AppProduction::planBeats() {
           judged[i] = CARRIER_OVERLOAD;
           _beatSteps[0][i] = STEPS_PER_28DEG;  // 拍1 旋转28°
           _nextState[i] = CARRIER_SAMSARA;     // → 转世
-          if (i > 0) {
+          if (i < 7) {
             judged[r] = CARRIER_ACCEPT_OVERLOAD;
             _beatSteps[1][r] = STEPS_PER_90DEG;  // 拍2 旋转90°
             _nextState[r] = CARRIER_LOCKED;
@@ -296,7 +296,7 @@ void AppProduction::planBeats() {
         _beatSteps[0][i] = STEPS_PER_32DEG;    // 拍1 旋转32°
         _beatSteps[2][i] = STEPS_PER_30DEG;    // 拍3 旋转30°
         _nextState[i] = CARRIER_LOCKED;
-        if (i > 0) {
+        if (i < 7) {
           judged[r] = CARRIER_ACCEPT_NEWBORN;
           _beatSteps[0][r] = STEPS_PER_30DEG;  // 拍1 旋转30°
           _beatSteps[1][r] = STEPS_PER_60DEG;  // 拍2 旋转60°
