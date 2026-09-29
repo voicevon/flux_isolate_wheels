@@ -77,6 +77,8 @@ private:
   const char* _beatCmd;
   // 单机调试节拍标志（完成时需恢复生产速度参数）
   bool _diagBeat;
+  // 生产节拍速度倍率（load 命令携带，如 0.1, 0.2, 0.5, 1.0, 1.5, 2.0，默认 1.0）
+  float _speedScale;
 };
 
 #endif // APP_PRODUCTION_H

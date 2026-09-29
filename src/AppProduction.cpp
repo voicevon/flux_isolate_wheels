@@ -79,7 +79,7 @@ static bool jsonGetFloatArray(const String& s, const char* key, float* out, int 
 
 AppProduction::AppProduction(MotorHardware& motorHardware, ShiftRegisterBus& spiBus, MqttLink& mqttLink)
   : _motorHardware(motorHardware), _spiBus(spiBus), _mqtt(mqttLink),
-    _state(BEAT_IDLE), _beatCmd("load"), _diagBeat(false), _currentBeat(0) {
+    _state(BEAT_IDLE), _beatCmd("load"), _diagBeat(false), _speedScale(1.0f), _currentBeat(0) {
   memset(_asparagusCounts, 0, sizeof(_asparagusCounts));
   memset(_targetSteps, 0, sizeof(_targetSteps));
   memset(_beatSteps, 0, sizeof(_beatSteps));
@@ -95,6 +95,7 @@ void AppProduction::setup() {
   _state = BEAT_IDLE;
   _beatCmd = "load";
   _diagBeat = false;
+  _speedScale = 1.0f;
   _currentBeat = 0;
   memset(_asparagusCounts, 0, sizeof(_asparagusCounts));
   memset(_targetSteps, 0, sizeof(_targetSteps));
@@ -193,7 +194,7 @@ void AppProduction::handleCommand(const char* payload) {
 }
 
 bool AppProduction::parseCommand(const char* payload) {
-  // 协议: {"cmd":"load","counts":[n1,...,n8]}，n1 为 1 号托架，n8 为 8 号
+  // 协议: {"cmd":"load","counts":[n1,...,n8],"speed":1.0}，n1 为 1 号托架，n8 为 8 号
   String data(payload);
   float values[8];
   if (!jsonGetFloatArray(data, "counts", values, 8)) {
@@ -209,9 +210,19 @@ bool AppProduction::parseCommand(const char* payload) {
     _asparagusCounts[i] = (uint8_t)values[i];
   }
 
-  LOG_I("接收到芦笋数据: 1号=%d, 2号=%d, 3号=%d, 4号=%d, 5号=%d, 6号=%d, 7号=%d, 8号=%d",
+  // 解析可选的速度倍率参数 (speed): 标速为 1.0，支持 0.1, 0.2, 0.5, 1.0, 1.5, 2.0 等，缺省默认为 1.0
+  float spd = 1.0f;
+  if (jsonGetFloat(data, "speed", spd)) {
+    if (spd <= 0.01f || spd > 5.0f) {
+      LOG_W("speed (%.2f) 越界，重置为 1.0", spd);
+      spd = 1.0f;
+    }
+  }
+  _speedScale = spd;
+
+  LOG_I("接收到芦笋数据: 1号=%d, 2号=%d, 3号=%d, 4号=%d, 5号=%d, 6号=%d, 7号=%d, 8号=%d (速度倍率=%.2fx)",
         _asparagusCounts[0], _asparagusCounts[1], _asparagusCounts[2], _asparagusCounts[3],
-        _asparagusCounts[4], _asparagusCounts[5], _asparagusCounts[6], _asparagusCounts[7]);
+        _asparagusCounts[4], _asparagusCounts[5], _asparagusCounts[6], _asparagusCounts[7], _speedScale);
   return true;
 }
 
@@ -366,6 +377,10 @@ void AppProduction::executeMove() {
     return;
   }
 
+  // 应用生产节拍的速度与加速度倍率
+  _motorHardware.setMaxSpeed(STEPPER_MAX_SPEED * _speedScale);
+  _motorHardware.setAcceleration(STEPPER_ACCELERATION * _speedScale);
+
   _mqtt.publishState("running");
   _state = BEAT_RUNNING;
   startBeat(0);
@@ -496,11 +511,12 @@ void AppProduction::loop() {
       // 动作结束，停止所有电机
       _motorHardware.stop();
 
-      // 调试节拍结束后恢复生产速度参数
+      // 节拍结束后恢复生产速度与加速度基准参数
+      _motorHardware.setMaxSpeed(STEPPER_MAX_SPEED);
+      _motorHardware.setAcceleration(STEPPER_ACCELERATION);
+      _speedScale = 1.0f;
       if (_diagBeat) {
         _diagBeat = false;
-        _motorHardware.setMaxSpeed(STEPPER_MAX_SPEED);
-        _motorHardware.setAcceleration(STEPPER_ACCELERATION);
       }
 
       // 发布节拍完成应答（回带命令类型）
